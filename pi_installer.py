@@ -29,8 +29,23 @@ def backup(path):
         shutil.copy2(p, BACKUP / p.name)
 
 
-def default_route():
-    return sh('ip', 'route', 'show', 'default', check=False, capture=True).stdout.strip()
+def default_routes():
+    out = sh('ip', 'route', 'show', 'default', check=False, capture=True).stdout
+    return [line.strip() for line in out.splitlines() if line.strip()]
+
+
+def preferred_default_route():
+    routes = default_routes()
+    if not routes:
+        return ''
+    def metric(line):
+        parts = line.split()
+        try:
+            i = parts.index('metric')
+            return int(parts[i + 1])
+        except (ValueError, IndexError):
+            return 0
+    return min(routes, key=metric)
 
 
 def preflight():
@@ -41,11 +56,13 @@ def preflight():
         sys.exit(f'AP interface {AP} not found')
     if not Path(f'/sys/class/net/{UPLINK}').exists():
         sys.exit(f'Uplink interface {UPLINK} not found. Set UNG_INTERNALNET_UPLINK_IFACE to the real uplink before apply.')
-    route = default_route()
+    route = preferred_default_route()
+    if not route:
+        sys.exit('REFUSED: no default route is available')
     if f'dev {AP}' in route:
-        sys.exit(f'REFUSED: {AP} is the current default-route interface. Connect a separate uplink before live activation.')
+        sys.exit(f'REFUSED: {AP} is the preferred default-route interface. Connect/promote a separate uplink before live activation.')
     if f'dev {UPLINK}' not in route:
-        sys.exit(f'REFUSED: {UPLINK} is not the current default-route uplink. Current route: {route or "none"}')
+        sys.exit(f'REFUSED: preferred default route is not on {UPLINK}. Current preferred route: {route}')
     if not all((GEN / x).exists() for x in ('hostapd.conf', 'dnsmasq.conf', 'nftables.conf')):
         sys.exit('Generated configs missing; render them first')
 
