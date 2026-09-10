@@ -1,11 +1,17 @@
+import json
 import os
 import secrets
 import subprocess
 import sys
 from pathlib import Path
-from fastapi import FastAPI, Header, HTTPException
+from typing import Optional
 
-APP_VERSION = "1.1.0"
+from fastapi import FastAPI, Header, HTTPException
+from pydantic import BaseModel
+
+from internalnet_100 import APStatus, diagnose_network, phase1_plan
+
+APP_VERSION = "1.2.0"
 LIVE = os.getenv("UNG_INTERNALNET_LIVE", "0") == "1"
 TOKEN = os.getenv("UNG_INTERNALNET_ADMIN_TOKEN", "")
 AP_IFACE = os.getenv("UNG_INTERNALNET_AP_IFACE", "wlan0")
@@ -14,9 +20,27 @@ SSID = os.getenv("UNG_INTERNALNET_SSID", "InternalNet")
 PASSPHRASE = os.getenv("UNG_INTERNALNET_PASSPHRASE", "")
 STATE = Path("/var/lib/ung-internalnet")
 GENERATED = STATE / "generated"
+TELEMETRY_FILE = STATE / "internalnet100_telemetry.json"
 INSTALLER = Path(__file__).resolve().with_name("pi_installer.py")
 
 app = FastAPI(title="UNG-INTERNALNET", version=APP_VERSION)
+
+
+class APTelemetry(BaseModel):
+    ap_id: str
+    online: bool = True
+    clients: int = 0
+    client_target: int = 50
+    signal_dbm: Optional[int] = None
+    packet_loss_pct: float = 0.0
+    latency_ms: float = 0.0
+
+
+class NetworkTelemetry(BaseModel):
+    aps: list[APTelemetry]
+    dhcp_used: int = 0
+    dhcp_total: int = 151
+    uplink_online: bool = True
 
 
 def admin(authorization: str | None):
@@ -47,6 +71,36 @@ def render():
     return {"rendered": True, "path": str(GENERATED)}
 
 
+def _persist_telemetry(report: dict):
+    try:
+        STATE.mkdir(parents=True, exist_ok=True)
+        TELEMETRY_FILE.write_text(json.dumps(report, indent=2))
+    except Exception:
+        pass
+
+
+def _load_telemetry():
+    if not TELEMETRY_FILE.exists():
+        return {
+            "system": "UNG-INTERNALNET",
+            "phase": "InternalNet-100",
+            "status": "not_reported",
+            "alarm_count": 0,
+            "alarms": [],
+            "message": "No controller/AP telemetry has been reported yet",
+        }
+    try:
+        return json.loads(TELEMETRY_FILE.read_text())
+    except Exception:
+        return {
+            "system": "UNG-INTERNALNET",
+            "phase": "InternalNet-100",
+            "status": "telemetry_error",
+            "alarm_count": 1,
+            "alarms": [],
+        }
+
+
 @app.get("/")
 def root():
     return {"system":"UNG-INTERNALNET","version":APP_VERSION,"ssid":SSID,"live_enabled":LIVE}
@@ -54,7 +108,14 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status":"ok","system":"UNG-INTERNALNET","version":APP_VERSION}
+    telemetry = _load_telemetry()
+    return {
+        "status":"ok",
+        "system":"UNG-INTERNALNET",
+        "version":APP_VERSION,
+        "internalnet100_status": telemetry.get("status"),
+        "diagnostic_alarm_count": telemetry.get("alarm_count", 0),
+    }
 
 
 @app.get("/api/network/status")
@@ -74,6 +135,31 @@ def status():
         "dnsmasq_active": active("dnsmasq"),
         "ap_address_present": "10.77.0.1/24" in addr.stdout,
     }
+
+
+@app.get("/api/capacity/plan")
+def capacity_plan():
+    return phase1_plan()
+
+
+@app.get("/api/telemetry/current")
+def telemetry_current():
+    return _load_telemetry()
+
+
+@app.post("/api/telemetry/evaluate")
+def telemetry_evaluate(body: NetworkTelemetry):
+    aps = [APStatus(**ap.model_dump()) for ap in body.aps]
+    return diagnose_network(aps, body.dhcp_used, body.dhcp_total, body.uplink_online)
+
+
+@app.post("/api/telemetry/report")
+def telemetry_report(body: NetworkTelemetry, authorization: str | None = Header(default=None)):
+    admin(authorization)
+    aps = [APStatus(**ap.model_dump()) for ap in body.aps]
+    report = diagnose_network(aps, body.dhcp_used, body.dhcp_total, body.uplink_online)
+    _persist_telemetry(report)
+    return report
 
 
 @app.post("/api/network/render")
