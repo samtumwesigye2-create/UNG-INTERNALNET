@@ -1,12 +1,12 @@
 """UNG-INTERNALNET Phase 1 capacity/control model for ~100 users.
-Non-destructive: this module models APs, VLANs, capacity and U-Code alarms; it does not rewrite hostapd/network config.
+Non-destructive: this module models APs, VLANs, capacity and diagnostic alarms; it does not rewrite hostapd/network config.
 """
 from dataclasses import dataclass, asdict
 from typing import Optional
 
 SYSTEM_CODE = "802"
 
-UCODES = {
+DCODES = {
     "000": ("healthy", "normal"),
     "201": ("access point offline", "critical"),
     "302": ("access point over capacity", "high"),
@@ -38,9 +38,20 @@ class APStatus:
 
 
 def alarm(fault: str, location: str, detail: str):
-    text, severity = UCODES[fault]
-    return {"u_code": f"U-{SYSTEM_CODE}-{fault}", "system": "UNG-INTERNALNET",
-            "location": location, "fault": text, "severity": severity, "detail": detail}
+    text, severity = DCODES[fault]
+    canonical = f"D-{SYSTEM_CODE}-{fault}"
+    return {
+        "d_code": canonical,
+        "code": canonical,
+        "legacy_u_code": f"U-{SYSTEM_CODE}-{fault}",
+        "system": "UNG-INTERNALNET",
+        "system_number": SYSTEM_CODE,
+        "location": location,
+        "fault_number": fault,
+        "fault": text,
+        "severity": severity,
+        "detail": detail,
+    }
 
 
 def diagnose_ap(ap: APStatus):
@@ -70,9 +81,18 @@ def diagnose_network(aps, dhcp_used: int, dhcp_total: int, uplink_online: bool =
         alarms.append(alarm("421", "DHCP", f"{dhcp_used}/{dhcp_total} leases in use"))
     if not uplink_online:
         alarms.append(alarm("503", "WAN", "internet uplink unavailable"))
-    return {"system": "UNG-INTERNALNET", "phase": "InternalNet-100", "users": clients,
-            "planned_capacity": target, "aps": [asdict(a) for a in aps], "vlans": VLANS,
-            "status": "healthy" if not alarms else "degraded", "alarms": alarms}
+    return {
+        "system": "UNG-INTERNALNET",
+        "system_number": SYSTEM_CODE,
+        "phase": "InternalNet-100",
+        "users": clients,
+        "planned_capacity": target,
+        "aps": [asdict(a) for a in aps],
+        "vlans": VLANS,
+        "status": "healthy" if not alarms else "degraded",
+        "alarm_count": len(alarms),
+        "alarms": alarms,
+    }
 
 
 def phase1_plan():
